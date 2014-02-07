@@ -5,6 +5,7 @@ __author__ = 'gc355804'
 
 class ProfileLog(object):
     entry_expr = re.compile('^[0-9.]+ ---.*$')
+    ENTRY_TIMEOUT = .1  # wait up to .1 seconds for more input
 
     def __init__(self, path, block_iter = False):
         self.open(path)
@@ -13,31 +14,49 @@ class ProfileLog(object):
     def open(self, path):
         self.path = path
         self.fd = open(path)
-        self.fd.readline()
-        self.command = self.fd.readline()
-        self.command = self.command.replace('0.000000 Command line:', '').replace('\n', '')
-        self.fd.readline()
-        # first two profile entries are junk data
-        curr = self.fd.readline()
-        while not ProfileLog.entry_expr.match(curr):
+        priming = self.fd.readline()
+        if re.match('^.*0.000.*$', priming):
+            self.command = self.fd.readline()
+            self.command = self.command.replace('0.000000 Command line:', '').replace('\n', '')
+            self.fd.readline()
+            # first profile entry is junk data
             curr = self.fd.readline()
-        self.read()
+            while not ProfileLog.entry_expr.match(curr):
+                curr = self.fd.readline()
 
     def read(self, primed=None):
         result = []
-        curr = primed
-        while not curr:
+        if primed:
+            result.append(primed)
+        curr = None
+        ctr = 0
+        while ctr < ProfileLog.ENTRY_TIMEOUT and not curr:
             curr = self.fd.readline()
             if not curr:
                 time.sleep(0.1)
-        while not ProfileLog.entry_expr.match(curr):
-            result.append(curr)
+                ctr += 1
+            if ProfileLog.entry_expr.match(curr):
+                curr = None
+            if curr:
+                result.append(curr)
+
+        if ctr >= ProfileLog.ENTRY_TIMEOUT:
+            return None
+
+        while ctr < ProfileLog.ENTRY_TIMEOUT * 100 and not ProfileLog.entry_expr.match(curr):
             curr = None
-            while not curr:
+            while ctr < ProfileLog.ENTRY_TIMEOUT * 100 and not curr:
                 curr = self.fd.readline()
-                if not curr:
-                    time.sleep(0.1)
-        return ProfileEntry(result)
+                if(curr and len(curr) > 1):
+                    result.append(curr)
+                else:
+                    time.sleep(0.01)
+                    ctr += 1
+        entry = ProfileEntry(result)
+        if not hasattr(entry, 'time'):
+            print result
+            return None
+        return entry
 
     ### Iterator definitions
     def __iter__(self):
@@ -52,7 +71,10 @@ class ProfileLog(object):
             else:
                 return self.read(primed=curr)
         else:
-            return self.read()
+            entry = None
+            while not entry:
+                entry = self.read(primed=curr)
+            return entry
 
 def parse_memory(entries, index, entry):
     target = entries[index].split(':', 1)
@@ -116,8 +138,8 @@ def parse_triggers(entries, index, entry):
     target = target[1]
     target = target.split(' ')
     entry.triggers = dict()
-    entry.triggers['total'] = (target[1].split('='))[1]
-    entry.triggers['pending'] = (target[2].replace('\n', '').split('='))[1]
+    entry.triggers['total'] = long((target[1].split('='))[1])
+    entry.triggers['pending'] = long((target[2].replace('\n', '').split('='))[1])
     entry.timer_instances = dict()
     offset = index + 1
     while offset < len(entries) and not re.match('^.*:.*$', entries[offset]):
